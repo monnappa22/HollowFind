@@ -4,6 +4,7 @@
 # Description: Volatility plugin to detect different types of Process Hollowing 
 
 import os
+import struct
 import volatility.obj as obj
 import volatility.utils as utils
 from volatility.plugins.taskmods import PSList
@@ -23,6 +24,18 @@ class HollowFind(vadinfo.VADDump):
         vadinfo.VADDump.__init__(self, config, *args, **kwargs)
         config.remove_option("BASE") 
     
+    def _get_peb_imagebase(self, proc):
+        # for WOW64 processes, there are 2 PEBs: one from the 64 bit world, and one for 32.
+        # In regards to Process Hollowing, the 32 bit version must be considered.
+        # Since the 32 bit PEB is currently not loaded, we simply read the image base directly
+        if proc.WoW64Process:
+            peb_base = proc.WoW64Process.Peb
+            proc_addr_space = proc.get_process_address_space()
+            return struct.unpack('<I', proc_addr_space.read((peb_base + 8), 4))[0]
+        else:
+            return proc.Peb.ImageBaseAddress
+
+
     def update_proc_peb_info(self, psdata):
         self.proc_peb_info = {}
         # Builds a dictionary of process executable information from PEB
@@ -36,11 +49,17 @@ class HollowFind(vadinfo.VADDump):
             if proc.Peb: 
                 # gets process information for the process executable from PEB and updates the dictionary 
                 mods = proc.get_load_modules()
+                proc_cmd_line = proc.Peb.ProcessParameters.CommandLine
+                proc_image_baseaddr = -1
+                mod_baseaddr = -1
+                mod_size = -1
+                mod_basename = "N/A"
+                mod_fullname = "N/A"
                 for mod in mods:
                     ext = os.path.splitext(str(mod.FullDllName))[1].lower()
                     if (ext == ".exe"):
                         proc_cmd_line = proc.Peb.ProcessParameters.CommandLine
-                        proc_image_baseaddr = proc.Peb.ImageBaseAddress
+                        proc_image_baseaddr = self._get_peb_imagebase(proc)
                         mod_baseaddr = mod.DllBase
                         mod_size = mod.SizeOfImage
                         mod_basename = mod.BaseDllName
@@ -76,7 +95,7 @@ class HollowFind(vadinfo.VADDump):
                     if str(vad.FileObject.FileName or ''):
                         ext = os.path.splitext(str(vad.FileObject.FileName))[1].lower()
                     
-                    if (ext == ".exe") or (vad.Start == proc.Peb.ImageBaseAddress):
+                    if (ext == ".exe") or (vad.Start == self._get_peb_imagebase(proc)):
                         vad_filename =  vad.FileObject.FileName
                         vad_baseaddr = vad.Start
                         vad_size = vad.End - vad.Start
